@@ -1,0 +1,148 @@
+import os
+import pandas as pd
+import google.generativeai as genai
+from google.ai.generativelanguage_v1beta.types import content
+import time
+from datetime import datetime
+import json
+
+# Establecer la clave manualmente
+os.environ['GEMINI_API_KEY'] = ''  # 🔹 Reemplaza con tu clave real
+
+# Configurar la API de Gemini
+gemini_api_key = os.getenv('GEMINI_API_KEY')
+genai.configure(api_key=gemini_api_key)
+
+def analizar_perfiles_batch(perfiles, max_retries=10):
+    """
+    Analiza un lote de perfiles profesionales usando Gemini
+    """
+    retries = 0
+    while retries < max_retries:
+      try:
+          # Crear el prompt para múltiples perfiles
+          prompt = "Analiza los siguientes perfiles profesionales y clasifícalos:\n\n"
+          for i, (company, position) in enumerate(perfiles, 1):
+              prompt += f"""
+  Perfil {i}:
+  <Nombre de la empresa en la que trabaja>
+  {company}
+  </Nombre de la empresa en la que trabaja>
+
+  <Posición que tiene dentro de la empresa>
+  {position}
+  </Posición que tiene dentro de la empresa>
+
+  """
+
+          prompt += """
+  Para cada perfil, identifica con qué categoría encaja mejor.
+  Devuelve un JSON array con las categorías en el mismo orden que los perfiles.
+  """
+
+          # Configuración del modelo
+          generation_config = {
+              "temperature": 0,
+              "top_p": 0.95,
+              "top_k": 40,
+              "max_output_tokens": 8192,
+              "response_mime_type": "application/json",
+              "response_schema": {
+                  "type": "object",
+                  "properties": {
+                      "area_conocimiento": {
+                      "type": "array",
+                      "items": {
+                          "type": "string",
+                          "enum": [
+                              "Ceo/Fundador",
+                              "Desarrollo de software",
+                              "Análisis de datos",
+                              "Product Management",
+                              "Abogado",
+                              "Diseño",
+                              "Marketing",
+                              "Finanzas",
+                              "Ventas",
+                              "Gestión de proyectos",
+                              "Desarrollo de negocio",
+                              "Recursos Humanos",
+                              "Operaciones",
+                              "Otra"
+                          ]
+                      }
+                  }
+              }
+          }
+          }
+
+          model = genai.GenerativeModel(
+              model_name="gemini-2.0-flash",
+              generation_config=generation_config,
+              system_instruction="Eres un experto en recursos humanos, tu misión es ayudarme a entender qué perfil tienen mis contactos de LinkedIn.",
+          )
+
+          chat_session = model.start_chat()
+          response = chat_session.send_message(prompt)
+          return response.text
+      except Exception as e:
+          error_str = str(e)
+          if "429" in error_str:  # Rate limit exceeded
+              retries += 1
+              print(f"Rate limit excedido. Reintentando en 10 segundos...")
+              time.sleep(10)
+              continue
+          else:
+              print(f"Error al procesar lote de perfiles: {e}")
+              return json.dumps(["Error en análisis"] * len(perfiles))
+
+def main():
+    # Leer el CSV
+    input_file = 'Connections.csv'
+    df = pd.read_csv(input_file)
+
+    # Crear nueva columna para el análisis
+    df['Area_Conocimiento'] = ''
+
+    # Procesar perfiles en lotes de 20
+    batch_size = 20
+    total_perfiles = len(df)
+
+    for i in range(0, total_perfiles, batch_size):
+        batch_end = min(i + batch_size, total_perfiles)
+        print(f"Procesando lote de perfiles {i+1}-{batch_end} de {total_perfiles}")
+
+        # Preparar lote de perfiles
+        batch_perfiles = [
+            (
+                str(df.iloc[j]['Company']) if pd.notna(df.iloc[j]['Company']) else '',
+                str(df.iloc[j]['Position']) if pd.notna(df.iloc[j]['Position']) else ''
+            )
+            for j in range(i, batch_end)
+        ]
+
+        # Obtener análisis del lote
+        analisis = analizar_perfiles_batch(batch_perfiles)
+        try:
+            resultados = json.loads(analisis)["area_conocimiento"]
+            print(f"Resultados: {resultados}")
+
+            # Asignar resultados a las filas correspondientes
+            for idx, resultado in enumerate(resultados):
+                df_idx = i + idx
+                df.at[df_idx, 'Area_Conocimiento'] = resultado
+                print(f"Perfil {df_idx + 1}: {resultado}")
+
+        except json.JSONDecodeError:
+            print(f"Error decodificando respuesta para el lote {i//batch_size + 1}")
+            for j in range(i, batch_end):
+                df.at[j, 'Area_Conocimiento'] = 'Error en análisis'
+
+    # Guardar resultados
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = f'linkedin_contacts_analyzed_{timestamp}.csv'
+    df.to_csv(output_file, index=False)
+    print(f"Análisis completado. Resultados guardados en: {output_file}")
+
+if __name__ == "__main__":
+    main()
